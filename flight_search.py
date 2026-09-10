@@ -2,7 +2,6 @@ from datetime import date, timedelta
 from typing import Iterator, Optional
 
 from fast_flights import FlightQuery, Passengers, create_query, get_flights
-from fast_flights.exceptions import FlightsNotFound
 
 
 def _parse_price(price_str: str) -> Optional[float]:
@@ -42,7 +41,16 @@ def search_round_trip(from_airport: str, to_airport: str, depart_date: str, retu
 
     try:
         result = get_flights(query)
-    except FlightsNotFound:
+    except Exception:
+        # A single failed search (network timeout/reset, Google returning an
+        # error page that fast_flights surfaces as FlightsNotFound, or a
+        # parsing failure inside fast_flights itself e.g. from a DOM/JSON
+        # shape change) must not crash the caller. Treat it as "no price
+        # found for this one origin/date combo" so
+        # find_cheapest_for_destination's per-combo loop can keep trying the
+        # remaining combos instead of the whole destination being abandoned.
+        # Scoped tightly to the get_flights() call itself -- a bug in our
+        # own _parse_price/min() logic below is NOT swallowed here.
         return None
 
     prices = [p for p in (_parse_price(str(flight.price)) for flight in result) if p is not None]

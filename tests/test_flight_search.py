@@ -1,5 +1,8 @@
 from unittest.mock import Mock, patch
 
+import pytest
+from fast_flights.exceptions import FlightsNotFound
+
 from flight_search import (
     _parse_price,
     find_cheapest_for_destination,
@@ -36,6 +39,20 @@ def test_search_round_trip_returns_min_price_from_result_flights(mock_get_flight
 @patch("flight_search.get_flights")
 def test_search_round_trip_returns_none_when_no_parseable_prices(mock_get_flights):
     mock_get_flights.return_value = [Mock(price="indisponível")]
+
+    assert search_round_trip("GRU", "LIS", "2026-11-10", "2026-11-24") is None
+
+
+@pytest.mark.parametrize(
+    "raised_exception",
+    [
+        FlightsNotFound("no flights found; received error"),
+        RuntimeError("connection reset"),
+    ],
+)
+@patch("flight_search.get_flights")
+def test_search_round_trip_returns_none_when_get_flights_raises(mock_get_flights, raised_exception):
+    mock_get_flights.side_effect = raised_exception
 
     assert search_round_trip("GRU", "LIS", "2026-11-10", "2026-11-24") is None
 
