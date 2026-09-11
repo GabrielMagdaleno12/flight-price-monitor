@@ -82,11 +82,14 @@ def process_destinations(
             # qualifying price would re-alert every run forever.
             if last_alerted_price is None or price < last_alerted_price:
                 message = format_message(name, origin, airport, price, depart_date, return_date, ceiling)
+                any_channel_sent = False
                 for notify in notify_fns:
                     try:
                         result = notify(message)
                         if result is False:
                             print(f"[WARN] Canal rejeitou a notificação de '{name}'", file=sys.stderr)
+                        else:
+                            any_channel_sent = True
                     except Exception as exc:  # noqa: BLE001 - one bad channel must not stop the batch
                         # Don't log the exception text itself: for Telegram it can
                         # embed the bot token in the request URL, and for Discord
@@ -96,7 +99,18 @@ def process_destinations(
                             file=sys.stderr,
                         )
                         continue
-                alerted_price = price
+                # Only mark this price as "alerted" if some channel actually
+                # delivered it -- otherwise an outage (or zero channels
+                # configured) would permanently suppress a real alert the
+                # user never received, since the same or a worse price would
+                # never re-trigger afterward.
+                if any_channel_sent:
+                    alerted_price = price
+                else:
+                    print(
+                        f"[WARN] Nenhum canal notificou '{name}' com sucesso; não marcando como alertado.",
+                        file=sys.stderr,
+                    )
 
         new_history = update_entry(new_history, key, name, price, now_fn(), alerted_price=alerted_price)
 

@@ -204,6 +204,97 @@ def test_realerts_when_qualifying_price_drops_further():
     assert new_history["LIS|2026-11-10|2026-11-24"]["last_alerted_price"] == 2800.0
 
 
+def test_does_not_mark_alerted_when_every_notify_channel_raises():
+    def failing_notify(message):
+        raise RuntimeError("webhook down")
+
+    new_history = process_destinations(
+        destinations=[make_destination()],
+        origin_airports=["GRU"],
+        dates_config=FIXED_DATES,
+        alerts_config={"price_ceiling_brl": 3500.0, "drop_pct_threshold": 15},
+        history={},
+        search_fn=lambda *a: 3000.0,
+        notify_fns=[failing_notify],
+        now_fn=lambda: "2026-09-10T08:00:00Z",
+    )
+
+    # Nothing was actually delivered, so the price must not be recorded as
+    # alerted -- otherwise a later run with the same qualifying price would
+    # wrongly be suppressed as a "repeat" of an alert that never arrived.
+    assert new_history["LIS|2026-11-10|2026-11-24"]["last_alerted_price"] is None
+
+
+def test_does_not_mark_alerted_when_no_notify_channels_configured():
+    new_history = process_destinations(
+        destinations=[make_destination()],
+        origin_airports=["GRU"],
+        dates_config=FIXED_DATES,
+        alerts_config={"price_ceiling_brl": 3500.0, "drop_pct_threshold": 15},
+        history={},
+        search_fn=lambda *a: 3000.0,
+        notify_fns=[],
+        now_fn=lambda: "2026-09-10T08:00:00Z",
+    )
+
+    assert new_history["LIS|2026-11-10|2026-11-24"]["last_alerted_price"] is None
+
+
+def test_marks_alerted_when_at_least_one_channel_succeeds_despite_another_failing():
+    sent = []
+
+    def failing_notify(message):
+        raise RuntimeError("webhook down")
+
+    new_history = process_destinations(
+        destinations=[make_destination()],
+        origin_airports=["GRU"],
+        dates_config=FIXED_DATES,
+        alerts_config={"price_ceiling_brl": 3500.0, "drop_pct_threshold": 15},
+        history={},
+        search_fn=lambda *a: 3000.0,
+        notify_fns=[failing_notify, sent.append],
+        now_fn=lambda: "2026-09-10T08:00:00Z",
+    )
+
+    assert len(sent) == 1
+    assert new_history["LIS|2026-11-10|2026-11-24"]["last_alerted_price"] == 3000.0
+
+
+def test_a_qualifying_price_re_alerts_on_the_next_run_if_first_run_delivered_nothing():
+    def failing_notify(message):
+        raise RuntimeError("webhook down")
+
+    # Run 1: notification fails entirely -- must not be marked as alerted.
+    history_after_run_1 = process_destinations(
+        destinations=[make_destination()],
+        origin_airports=["GRU"],
+        dates_config=FIXED_DATES,
+        alerts_config={"price_ceiling_brl": 3500.0, "drop_pct_threshold": 15},
+        history={},
+        search_fn=lambda *a: 3000.0,
+        notify_fns=[failing_notify],
+        now_fn=lambda: "2026-09-10T08:00:00Z",
+    )
+
+    # Run 2: same qualifying price, but this time the channel works -- it
+    # must still alert, since run 1 never actually delivered anything.
+    sent = []
+    history_after_run_2 = process_destinations(
+        destinations=[make_destination()],
+        origin_airports=["GRU"],
+        dates_config=FIXED_DATES,
+        alerts_config={"price_ceiling_brl": 3500.0, "drop_pct_threshold": 15},
+        history=history_after_run_1,
+        search_fn=lambda *a: 3000.0,
+        notify_fns=[sent.append],
+        now_fn=lambda: "2026-09-10T08:30:00Z",
+    )
+
+    assert len(sent) == 1
+    assert history_after_run_2["LIS|2026-11-10|2026-11-24"]["last_alerted_price"] == 3000.0
+
+
 def test_does_not_realert_when_price_no_longer_qualifies_but_updates_last_price():
     sent = []
     history = {
