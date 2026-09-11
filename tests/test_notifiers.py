@@ -1,5 +1,7 @@
 from unittest.mock import Mock, patch
 
+import pytest
+
 from notifiers.discord import send_discord
 from notifiers.email import send_email
 from notifiers.telegram import send_telegram
@@ -51,11 +53,12 @@ def test_send_email_logs_in_and_sends_returns_true_on_success(mock_smtp_class):
 
 
 @patch("notifiers.email.smtplib.SMTP")
-def test_send_email_returns_false_when_smtp_raises(mock_smtp_class):
+def test_send_email_propagates_exception_when_smtp_raises(mock_smtp_class):
+    # Consistent error contract across all three notifiers: let the
+    # underlying exception propagate (like telegram/discord's requests
+    # exceptions) rather than swallowing it and returning False. main.py's
+    # per-channel try/except is what actually catches this.
     mock_smtp_class.return_value.__enter__.side_effect = RuntimeError("smtp down")
 
-    result = send_email(
-        "smtp.gmail.com", 587, "me@gmail.com", "app-password", "to@example.com", "Alerta", "preço bom"
-    )
-
-    assert result is False
+    with pytest.raises(RuntimeError):
+        send_email("smtp.gmail.com", 587, "me@gmail.com", "app-password", "to@example.com", "Alerta", "preço bom")

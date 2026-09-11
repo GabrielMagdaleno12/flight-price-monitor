@@ -4,11 +4,19 @@ import pytest
 from fast_flights.exceptions import FlightsNotFound
 
 from flight_search import (
+    MIN_PLAUSIBLE_PRICE_BRL,
     _parse_price,
     find_cheapest_for_destination,
     iterate_flexible_dates,
     search_round_trip,
 )
+
+
+@pytest.fixture(autouse=True)
+def no_sleep(monkeypatch):
+    # find_cheapest_for_destination now sleeps SEARCH_DELAY_SECONDS between
+    # calls; keep the test suite fast and deterministic.
+    monkeypatch.setattr("flight_search.time.sleep", lambda *_: None)
 
 
 def test_parse_price_handles_dollar_sign_and_comma_thousands():
@@ -17,6 +25,14 @@ def test_parse_price_handles_dollar_sign_and_comma_thousands():
 
 def test_parse_price_handles_brl_style_dot_thousands_comma_decimal():
     assert _parse_price("R$ 1.234,56") == 1234.56
+
+
+def test_parse_price_handles_single_dot_as_thousands_separator():
+    assert _parse_price("R$ 1.234") == 1234.0
+
+
+def test_parse_price_handles_single_comma_as_decimal_separator():
+    assert _parse_price("R$ 12,50") == 12.50
 
 
 def test_parse_price_returns_none_for_unparseable_string():
@@ -39,6 +55,13 @@ def test_search_round_trip_returns_min_price_from_result_flights(mock_get_flight
 @patch("flight_search.get_flights")
 def test_search_round_trip_returns_none_when_no_parseable_prices(mock_get_flights):
     mock_get_flights.return_value = [Mock(price="indisponível")]
+
+    assert search_round_trip("GRU", "LIS", "2026-11-10", "2026-11-24") is None
+
+
+@patch("flight_search.get_flights")
+def test_search_round_trip_returns_none_when_price_below_plausible_floor(mock_get_flights):
+    mock_get_flights.return_value = [Mock(price=MIN_PLAUSIBLE_PRICE_BRL - 1)]
 
     assert search_round_trip("GRU", "LIS", "2026-11-10", "2026-11-24") is None
 
@@ -67,6 +90,11 @@ def test_iterate_flexible_dates_steps_through_window():
     ]
 
 
+def test_iterate_flexible_dates_rejects_non_positive_granularity():
+    with pytest.raises(ValueError):
+        list(iterate_flexible_dates("2026-11-01", "2026-11-15", trip_length_days=14, granularity_days=0))
+
+
 def test_find_cheapest_for_destination_fixed_mode_single_search():
     calls = []
 
@@ -78,7 +106,12 @@ def test_find_cheapest_for_destination_fixed_mode_single_search():
 
     result = find_cheapest_for_destination(["GRU"], "LIS", dates_config, search_fn=fake_search)
 
-    assert result == {"price": 3000.0, "depart_date": "2026-11-10", "return_date": "2026-11-24"}
+    assert result == {
+        "price": 3000.0,
+        "depart_date": "2026-11-10",
+        "return_date": "2026-11-24",
+        "origin": "GRU",
+    }
     assert calls == [("GRU", "LIS", "2026-11-10", "2026-11-24")]
 
 
@@ -98,7 +131,12 @@ def test_find_cheapest_for_destination_flexible_mode_picks_lowest():
 
     result = find_cheapest_for_destination(["GRU"], "LIS", dates_config, search_fn=fake_search)
 
-    assert result == {"price": 2900.0, "depart_date": "2026-11-08", "return_date": "2026-11-22"}
+    assert result == {
+        "price": 2900.0,
+        "depart_date": "2026-11-08",
+        "return_date": "2026-11-22",
+        "origin": "GRU",
+    }
 
 
 def test_find_cheapest_for_destination_tries_every_origin_airport():
@@ -112,6 +150,7 @@ def test_find_cheapest_for_destination_tries_every_origin_airport():
     result = find_cheapest_for_destination(["GRU", "CGH"], "LIS", dates_config, search_fn=fake_search)
 
     assert result["price"] == 2950.0
+    assert result["origin"] == "CGH"
 
 
 def test_find_cheapest_for_destination_returns_none_when_every_search_fails():

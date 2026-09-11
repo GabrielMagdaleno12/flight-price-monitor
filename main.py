@@ -3,6 +3,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -17,10 +18,13 @@ CONFIG_FILE = Path("config.yaml")
 HISTORY_FILE = Path("data/price_history.json")
 
 
-def format_message(name, airport, price, depart_date, return_date, ceiling):
-    ceiling_note = f" (teto: {ceiling:.2f})" if ceiling is not None else ""
+def format_message(name, origin, airport, price, depart_date, return_date, ceiling):
+    # Only mention the ceiling when it's actually why we're at/under it -- a
+    # drop-% alert can fire on a price above the ceiling, and printing
+    # "(teto: X)" next to a price higher than X reads as a bug.
+    ceiling_note = f" (teto: R$ {ceiling:.2f})" if ceiling is not None and price <= ceiling else ""
     return (
-        f"✈️ {name} ({airport}) por {price:.2f} "
+        f"✈️ {name} ({origin} → {airport}) por R$ {price:.2f} "
         f"(ida {depart_date}, volta {return_date}){ceiling_note}"
     )
 
@@ -33,7 +37,8 @@ def process_destinations(
     history,
     search_fn,
     notify_fns,
-    now_fn=lambda: datetime.now(timezone.utc).isoformat(),
+    now_fn=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    stats: Optional[dict] = None,
 ):
     new_history = dict(history)
 
@@ -47,30 +52,53 @@ def process_destinations(
             best = find_cheapest_for_destination(origin_airports, airport, dates_config, search_fn)
         except Exception as exc:  # noqa: BLE001 - one bad destination must not stop the batch
             print(f"[WARN] Falha ao buscar '{name}' ({airport}): {exc}", file=sys.stderr)
+            if stats is not None:
+                stats["attempted"] = stats.get("attempted", 0) + 1
             continue
 
         if best is None:
             print(f"[WARN] Nenhum preço encontrado para '{name}' ({airport})", file=sys.stderr)
+            if stats is not None:
+                stats["attempted"] = stats.get("attempted", 0) + 1
             continue
 
+        if stats is not None:
+            stats["attempted"] = stats.get("attempted", 0) + 1
+            stats["found"] = stats.get("found", 0) + 1
+
         price = best["price"]
+        origin = best["origin"]
         depart_date = best["depart_date"]
         return_date = best["return_date"]
         key = make_key(airport, depart_date, return_date)
-        lowest_price_seen = history.get(key, {}).get("lowest_price_brl")
+        existing_entry = history.get(key, {})
+        lowest_price_seen = existing_entry.get("lowest_price_brl")
+        last_alerted_price = existing_entry.get("last_alerted_price")
 
+        alerted_price = None
         if should_alert(price, ceiling, lowest_price_seen, drop_pct):
-            message = format_message(name, airport, price, depart_date, return_date, ceiling)
-            for notify in notify_fns:
-                try:
-                    result = notify(message)
-                    if result is False:
-                        print(f"[WARN] Canal rejeitou a notificação de '{name}'", file=sys.stderr)
-                except Exception as exc:  # noqa: BLE001 - one bad channel must not stop the batch
-                    print(f"[WARN] Falha ao notificar '{name}' via {notify!r}: {exc}", file=sys.stderr)
-                    continue
+            # Re-alert only if this qualifying price is an improvement over the
+            # last one we actually notified for -- otherwise the same
+            # qualifying price would re-alert every run forever.
+            if last_alerted_price is None or price < last_alerted_price:
+                message = format_message(name, origin, airport, price, depart_date, return_date, ceiling)
+                for notify in notify_fns:
+                    try:
+                        result = notify(message)
+                        if result is False:
+                            print(f"[WARN] Canal rejeitou a notificação de '{name}'", file=sys.stderr)
+                    except Exception as exc:  # noqa: BLE001 - one bad channel must not stop the batch
+                        # Don't log the exception text itself: for Telegram it can
+                        # embed the bot token in the request URL, and for Discord
+                        # the webhook URL itself is the secret.
+                        print(
+                            f"[WARN] Falha ao notificar '{name}': {type(exc).__name__}",
+                            file=sys.stderr,
+                        )
+                        continue
+                alerted_price = price
 
-        new_history = update_entry(new_history, key, name, price, now_fn())
+        new_history = update_entry(new_history, key, name, price, now_fn(), alerted_price=alerted_price)
 
     return new_history
 
@@ -108,18 +136,35 @@ def main() -> None:
     else:
         print("[INFO] E-mail não configurado - pulando esse canal.", file=sys.stderr)
 
+    destinations = config.get("destinations") or []
+    origin_airports = config.get("origin") or []
+
+    stats = {"attempted": 0, "found": 0}
     new_history = process_destinations(
-        destinations=config["destinations"],
-        origin_airports=config["origin"],
+        destinations=destinations,
+        origin_airports=origin_airports,
         dates_config=config["dates"],
         alerts_config=config["alerts"],
         history=history,
         search_fn=search_round_trip,
         notify_fns=notify_fns,
+        stats=stats,
     )
 
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     save_history(HISTORY_FILE, new_history)
+
+    if destinations and stats["found"] == 0:
+        # Every destination search failed this run (e.g. Google blocked the
+        # runner's IP) -- exit non-zero so the GitHub Actions run shows red.
+        # This is a process exit code, not a notification, so it doesn't
+        # violate the "no per-failure alerting" non-goal.
+        print(
+            f"[ERROR] Nenhum preço encontrado em nenhum dos {len(destinations)} destino(s); "
+            "abortando com falha.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
