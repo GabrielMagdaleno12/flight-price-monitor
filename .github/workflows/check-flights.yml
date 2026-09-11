@@ -1,4 +1,7 @@
 # .github/workflows/check-flights.yml
+#
+# (Trivial re-push to nudge GitHub Actions into registering this workflow --
+# it wasn't appearing in the Actions tab after the initial push.)
 name: Check flight prices
 
 on:
