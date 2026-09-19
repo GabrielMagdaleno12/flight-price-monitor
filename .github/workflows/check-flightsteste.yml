@@ -49,3 +49,4 @@ jobs:
           git add data/price_history.json
           git diff --cached --quiet || git commit -m "Update price history [skip ci]"
           git push
+#
